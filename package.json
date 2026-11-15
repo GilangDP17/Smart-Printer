@@ -1,0 +1,14 @@
+{
+  "name": "smart-printer",
+  "version": "1.0.0",
+  "description": "Smart Printer WhatsApp dengan cetak otomatis",
+  "main": "print.js",
+  "scripts": {
+    "start": "node print.js"
+  },
+  "type": "commonjs",
+  "dependencies": {
+    "@whiskeysockets/baileys": "^6.7.24",
+    "qrcode-terminal": "^0.12.0"
+  }
+}
