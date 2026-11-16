@@ -25,9 +25,13 @@ const PRINTER_NAME = "EPSON L3210 Series";
 const SUMATRA_PATH =
   "C:\\Users\\Gilang\\AppData\\Local\\SumatraPDF\\SumatraPDF.exe";
 
+  // Lokasi LibreOffice
+const LIBREOFFICE_PATH =
+  "C:\\Program Files\\LibreOffice\\program\\soffice.exe";
+
   
 // Ganti PIN ini sebelum digunakan customer
-const ACCESS_PIN = "5678";
+const ACCESS_PIN = "TKJ";
 
 // Folder penyimpanan
 const UPLOAD_DIR = path.join(__dirname, "uploads");
@@ -48,6 +52,8 @@ const pendingFiles = new Map();
 const printQueue = [];
 
 let isProcessing = false;
+let reconnectTimer = null;
+let isStarting = false;
 
 // ===============================
 // FUNGSI LOG
@@ -104,6 +110,71 @@ async function printPDF(filePath, paper) {
 }
 
 // ===============================
+// CONVERT FILE KE PDF
+// ===============================
+
+async function convertToPDF(filePath) {
+  const extension = path.extname(filePath).toLowerCase();
+
+  // PDF tidak perlu dikonversi
+  if (extension === ".pdf") {
+    return filePath;
+  }
+
+  if (!fs.existsSync(LIBREOFFICE_PATH)) {
+    throw new Error("LibreOffice tidak ditemukan.");
+  }
+
+  const outputDir = path.join(UPLOAD_DIR, "converted");
+
+  fs.mkdirSync(outputDir, { recursive: true });
+
+  const outputPath = path.join(
+    outputDir,
+    `${path.parse(filePath).name}.pdf`
+  );
+
+  await execFileAsync(
+    LIBREOFFICE_PATH,
+    [
+      "--headless",
+      "--convert-to",
+      "pdf",
+      "--outdir",
+      outputDir,
+      filePath
+    ],
+    {
+      timeout: 120000,
+      windowsHide: true
+    }
+  );
+
+  if (!fs.existsSync(outputPath)) {
+    throw new Error("Gagal mengubah dokumen menjadi PDF.");
+  }
+
+  return outputPath;
+}
+
+// ===============================
+// CETAK SEMUA FORMAT
+// ===============================
+
+async function printAnyFile(filePath, paper) {
+  const pdfPath = await convertToPDF(filePath);
+
+  try {
+    await printPDF(pdfPath, paper);
+  } finally {
+    if (pdfPath !== filePath && fs.existsSync(pdfPath)) {
+      fs.unlinkSync(pdfPath);
+    }
+  }
+}
+
+
+// ===============================
 // PROSES ANTREAN CETAK
 // ===============================
 
@@ -118,10 +189,10 @@ async function processQueue(sock) {
 
       try {
         await sock.sendMessage(job.from, {
-          text: `⏳ Dokumen "${job.originalName}" sedang dikirim ke printer.`
+          text: `⏳ Dokumen "${job.originalName}"  dikirim ke printer.`
         });
 
-        await printPDF(job.filePath, job.paper);
+        await printAnyFile(job.filePath, job.paper);
 
         // Arsipkan setelah perintah cetak berhasil dikirim
         const archiveName =
@@ -140,10 +211,10 @@ async function processQueue(sock) {
 
         await sock.sendMessage(job.from, {
           text:
-            `✅ Perintah cetak dokumen berhasil dikirim ke printer.\n\n` +
+            `✅ Dokumen berhasil terkirim.\n\n` +
             `Nama file: ${job.originalName}\n` +
             `Ukuran kertas: ${job.paper}\n\n` +
-            `Silakan tunggu hasil cetak dari Epson L3210.`
+            `Silahkan tunggu hasil cetak dari Epson L3210.`
         });
 
       } catch (error) {
@@ -155,8 +226,8 @@ async function processQueue(sock) {
 
         await sock.sendMessage(job.from, {
           text:
-            `❌ Dokumen "${job.originalName}" gagal dikirim ke printer.\n` +
-            `Silakan hubungi operator.`
+            `❌ Dokumen "${job.originalName}" gagal dikirim .\n` +
+            `Silahkan hubungi admin.`
         });
       }
     }
@@ -172,28 +243,62 @@ async function processQueue(sock) {
 async function handleDocument(sock, msg, from) {
   if (!authenticatedUsers.has(from)) {
     await sock.sendMessage(from, {
-      text: "🔐 Silakan masukkan PIN terlebih dahulu."
+      text: "🔐 Silahkan masukkan PIN \"TKJ\" terlebih dahulu."
     });
     return;
   }
 
-  const document = msg.message.documentMessage;
+  const document =
+    msg.message.documentMessage ||
+    msg.message.imageMessage;
 
-  if (document.mimetype !== "application/pdf") {
+  if (!document) return;
+
+  // Tentukan nama file
+  const mimeExtensions = {
+    "image/jpeg": ".jpg",
+    "image/png": ".png"
+  };
+
+  const originalName =
+    document.fileName ||
+    `foto_${Date.now()}${mimeExtensions[document.mimetype] || ".jpg"}`;
+
+  const extension = path.extname(originalName).toLowerCase();
+
+  // Format yang diperbolehkan
+  const allowedExtensions = [
+    ".pdf",
+    ".doc",
+    ".docx",
+    ".xls",
+    ".xlsx",
+    ".jpg",
+    ".jpeg",
+    ".png"
+  ];
+
+  if (!allowedExtensions.includes(extension)) {
     await sock.sendMessage(from, {
-      text: "Mohon maaf, saat ini hanya PDF yang didukung."
+      text: "❌ Format file belum didukung."
     });
     return;
   }
 
+  // Download file WhatsApp
   const buffer = await downloadMediaMessage(
     msg,
     "buffer",
     {}
   );
 
-  const originalName =
-    document.fileName || "dokumen.pdf";
+  // Batas ukuran file 20 MB
+  if (buffer.length > 20 * 1024 * 1024) {
+    await sock.sendMessage(from, {
+      text: "❌ Ukuran file maksimal 20 MB."
+    });
+    return;
+  }
 
   const safeName = originalName.replace(
     /[^a-zA-Z0-9._-]/g,
@@ -214,7 +319,8 @@ async function handleDocument(sock, msg, from) {
   await sock.sendMessage(from, {
     text:
       `✅ Dokumen berhasil diterima.\n\n` +
-      `Nama file: ${originalName}\n\n` +
+      `Nama file: ${originalName}\n` +
+      `Format: ${extension}\n\n` +
       `Pilih ukuran kertas:\n` +
       `1. A4\n` +
       `2. F4\n\n` +
@@ -239,12 +345,12 @@ async function handleText(sock, from, text) {
       await sock.sendMessage(from, {
         text:
           "✅ PIN benar.\n\n" +
-          "Selamat datang di layanan Smart Printer.\n" +
-          "Silakan kirim dokumen PDF."
+          "Selamat datang di layanan PrinterCerdas TKJ.\n" +
+          "Silahkan kirim dokumen."
       });
     } else {
       await sock.sendMessage(from, {
-        text: "🔐 Masukkan PIN untuk menggunakan layanan."
+        text: "🔐 Masukkan PIN \"TKJ\" untuk menggunakan layanan."
       });
     }
 
@@ -256,7 +362,7 @@ async function handleText(sock, from, text) {
 
   if (!pending) {
     await sock.sendMessage(from, {
-      text: "Silakan kirim dokumen PDF terlebih dahulu."
+      text: "Silahkan kirim dokumen anda terlebih dahulu."
     });
     return;
   }
@@ -299,73 +405,65 @@ async function handleText(sock, from, text) {
 // ===============================
 
 async function startBot() {
-  const { state, saveCreds } =
-    await useMultiFileAuthState("auth_info");
+  if (isStarting) return;
 
-  const sock = makeWASocket({
-    auth: state,
-    browser: ["Smart Printer", "Chrome", "1.0.0"]
-  });
+  isStarting = true;
 
-  sock.ev.on("creds.update", saveCreds);
+  try {
+    const { state, saveCreds } =
+      await useMultiFileAuthState("auth_info");
 
-  sock.ev.on("connection.update", (update) => {
-    const { connection, lastDisconnect, qr } = update;
+    const sock = makeWASocket({
+      auth: state,
+      browser: ["Smart Printer", "Chrome", "1.0.0"]
+    });
 
-    if (qr) {
-      console.log("Scan QR WhatsApp berikut:");
-      qrcode.generate(qr, { small: true });
-    }
+    sock.ev.on("creds.update", saveCreds);
 
-    if (connection === "open") {
-      console.log("✅ WhatsApp berhasil terhubung.");
-    }
+    sock.ev.on("connection.update", (update) => {
+      const { connection, lastDisconnect, qr } = update;
 
-    if (connection === "close") {
-      const statusCode =
-        lastDisconnect?.error?.output?.statusCode;
-
-      if (statusCode !== DisconnectReason.loggedOut) {
-        console.log("Koneksi terputus. Mencoba menyambungkan ulang...");
-        startBot();
-      } else {
-        console.log("WhatsApp logout. Hubungkan ulang dengan scan QR.");
+      if (qr) {
+        console.log("Scan QR WhatsApp berikut:");
+        qrcode.generate(qr, { small: true });
       }
-    }
-  });
 
-  sock.ev.on("messages.upsert", async ({ messages }) => {
-    for (const msg of messages) {
-      if (!msg.message || msg.key.fromMe) continue;
+      if (connection === "open") {
+        console.log("✅ WhatsApp berhasil terhubung.");
 
-      const from = msg.key.remoteJid;
-
-      // Abaikan status WhatsApp
-      if (from === "status@broadcast") continue;
-
-      try {
-        const content = msg.message;
-
-        if (content.documentMessage) {
-          await handleDocument(sock, msg, from);
-        } else {
-          const text =
-            content.conversation ||
-            content.extendedTextMessage?.text;
-
-          if (text) {
-            await handleText(sock, from, text);
-          }
+        if (reconnectTimer) {
+          clearTimeout(reconnectTimer);
+          reconnectTimer = null;
         }
-      } catch (error) {
-        console.error("Kesalahan pesan:", error);
-
-        await sock.sendMessage(from, {
-          text: "❌ Terjadi kesalahan saat memproses pesan."
-        });
       }
-    }
-  });
-}
 
-startBot().catch(console.error);
+      if (connection === "close") {
+        const statusCode =
+          lastDisconnect?.error?.output?.statusCode;
+
+        console.log("❌ Koneksi WhatsApp terputus.");
+        console.log("Status:", statusCode);
+
+        if (statusCode === DisconnectReason.loggedOut) {
+          console.log("WhatsApp logout. Hubungkan ulang dengan QR.");
+          return;
+        }
+
+        if (!reconnectTimer) {
+          console.log("Mencoba reconnect dalam 5 detik...");
+
+          reconnectTimer = setTimeout(() => {
+            reconnectTimer = null;
+            startBot().catch(console.error);
+          }, 5000);
+        }
+      }
+    });
+
+    // Pertahankan event messages.upsert
+    // dari kode lama kamu di sini.
+
+  } finally {
+    isStarting = false;
+  }
+}
